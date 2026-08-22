@@ -63,9 +63,18 @@ def test_staff_may_scope_to_any_account(seeded_db, staff_session):
 def test_agreement_override_is_traceable_in_results(seeded_db, customer_sessions):
     conn, _ = seeded_db
     env = search_knowledge(conn, customer_sessions["ACCT-001"], "cancellation fee")
-    sop_items = [r for r in env.result["results"] if r["source_doc"].startswith("03_")]
-    assert sop_items
+    # Only substantive SOP sections (not the document Header, which is
+    # metadata) should be overridden when the agreement covers the same
+    # policy subject (subtopic-aware conflict resolution).
+    sop_items = [r for r in env.result["results"]
+                 if r["source_doc"].startswith("03_") and r["section"] != "Header"]
+    assert sop_items, "expected at least one substantive SOP result"
     assert all(r["overridden_by"] for r in sop_items)
+    # The SOP Header stays in the trace as metadata without an override:
+    sop_header = [r for r in env.result["results"]
+                  if r["source_doc"].startswith("03_") and r["section"] == "Header"]
+    for h in sop_header:
+        assert h["overridden_by"] is None
 
 
 def test_include_historical_marks_context_rank_none(seeded_db, customer_sessions):
@@ -147,3 +156,32 @@ def test_no_match_is_ok_with_explanation(seeded_db, staff_session):
     assert env.status == "ok"
     assert env.result["results"] == []
     assert "note" in env.result
+
+
+# --- Known-issue / product-issue knowledge retrieval ---------------------------
+
+def test_known_issue_query_retrieves_operations_guide(seeded_db, staff_session):
+    """A query about known issues must surface results from the operations
+    guide (04_). Using ACCT-003 (no agreement) avoids the 8-slot cap
+    crowding out rank-3 documents when higher-rank agreement chunks are
+    force-included."""
+    conn, _ = seeded_db
+    env = search_knowledge(conn, staff_session, "known issue pickup processing",
+                           account_scope="ACCT-003")
+    assert env.status == "ok"
+    docs = {r["source_doc"] for r in env.result["results"]}
+    assert any(d.startswith("04_") for d in docs), (
+        "operations guide must be retrievable for known-issue queries"
+    )
+
+
+def test_product_capability_query_retrieves_operations_guide(seeded_db, staff_session):
+    """Plan capability questions must route to the knowledge tool and
+    return results from the operations guide."""
+    conn, _ = seeded_db
+    env = search_knowledge(conn, staff_session, "plan capabilities",
+                           account_scope="ACCT-003")
+    assert env.status == "ok"
+    docs = {r["source_doc"] for r in env.result["results"]}
+    assert any(d.startswith("04_") for d in docs)
+

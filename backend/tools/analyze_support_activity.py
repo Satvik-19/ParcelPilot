@@ -13,6 +13,7 @@ from backend.domain.sla import check_sla_breach
 from backend.security import authorization
 from backend.security.authorization import visible_account_ids
 
+from ._accounts import canonical_account_id
 from ._envelope import envelope_ok, envelope_rejected
 
 _KEYWORDS = (
@@ -35,7 +36,9 @@ def analyze_support_activity(conn, session, as_of=None, account_scope=None):
     account_ids = conn.execute("SELECT account_id FROM accounts").fetchall()
     visible = visible_account_ids(sess, [r["account_id"] for r in account_ids])
     if account_scope is not None:
-        # The optional scope can only NARROW the staff view, never widen it.
+        # Canonicalize display-name scopes; the optional scope can only
+        # NARROW the staff view, never widen it.
+        account_scope = canonical_account_id(conn, account_scope) or account_scope
         if account_scope not in visible:
             return envelope_rejected(
                 "ACCESS_DENIED",

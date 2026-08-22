@@ -18,9 +18,12 @@ from ._errors import ProviderError
 _USER_AGENT = "ParcelPilot/1.0 (support-agent runtime)"
 
 _RETRYABLE = (408, 429, 500, 502, 503, 504)
-_MAX_ATTEMPTS = 4
+# Two attempts max: one retry, then fail fast so the FallbackProvider can
+# switch to OpenRouter. More attempts on a flaky Groq waste wall-clock
+# without improving success — the fallback is the real safety net.
+_MAX_ATTEMPTS = 2
 _NETWORK_MAX_ATTEMPTS = 2  # timeouts/network — retry once, then fail fast to fallback
-_BACKOFF_SECONDS = 3.0
+_BACKOFF_SECONDS = 1.0
 
 
 class GroqAPIError(ProviderError):
@@ -64,7 +67,7 @@ class GroqClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=90) as response:
+                with urllib.request.urlopen(request, timeout=30) as response:
                     return json.load(response)
             except urllib.error.HTTPError as err:
                 detail = err.read().decode("utf-8", "replace")[:300]

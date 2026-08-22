@@ -324,8 +324,11 @@ class TestSecurityThroughFallback:
                    "session_id": "sess-failover-acct-002"}
         result = _run(provider, seeded_conn, session=session)
 
-        # ACCESS_DENIED should appear in the tool feedback
-        assert result.answer_state == "INSUFFICIENT_EVIDENCE"
+        # ACCESS_DENIED appears in the tool feedback; the denial is a
+        # trusted definitive outcome, so the turn ends as an ANSWER —
+        # never INSUFFICIENT_EVIDENCE (manual-validation ISSUE 3).
+        assert result.trace["tools"][0]["status"] == "rejected"
+        assert result.answer_state == "ANSWER"
 
     def test_confirmation_surface_unreachable_through_fallback(self,
                                                                seeded_conn):

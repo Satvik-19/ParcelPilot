@@ -150,11 +150,17 @@ def to_fts_query(query):
     operators (OR/NOT/NEAR), column filters, wildcards and quote escapes in
     user text can never change the query's meaning — and the result is still
     passed to SQLite as a bound parameter (never interpolated into SQL).
+
+    Tokens are OR-joined: an AND across every word of a natural-language
+    question silently drops otherwise-authoritative sources that miss a
+    single token (e.g. the service-credit SOP for "pickup is three hours
+    late because of carrier fault"). OR keeps recall; bm25 ``rank`` ordering
+    plus the authority/scope filters keep precision.
     """
     tokens = re.findall(r"\w+", str(query))
     if not tokens:
         raise ValueError(f"empty FTS query: {query!r}")
-    return " ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def visible_to_account(chunk_row, account_id):

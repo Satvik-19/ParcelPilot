@@ -27,10 +27,11 @@ def search_scoped_chunks(conn, account_id, query, include_historical=False):
 
     `account_id` must already be the scope the session is authorized for —
     the caller (tool layer) checks that via security.authorization before
-    getting here.
+    getting here. Each chunk keeps its bm25 ``fts_rank`` so the evidence
+    layer can prefer better lexical matches when trimming to the cap.
     """
     rows = conn.execute(
-        f"SELECT {_CHUNK_FIELDS}"
+        f"SELECT {_CHUNK_FIELDS}, rank AS fts_rank"
         " FROM chunks_fts f JOIN document_chunks c ON c.chunk_id = f.rowid"
         " WHERE chunks_fts MATCH ? ORDER BY rank, c.chunk_id",
         (to_fts_query(query),),
@@ -48,7 +49,8 @@ def search_scoped_chunks(conn, account_id, query, include_historical=False):
 def all_scoped_chunks(conn, account_id, include_historical=False):
     """Scope-constrained scan without a lexical query (force-inclusion paths)."""
     rows = conn.execute(
-        f"SELECT {_CHUNK_FIELDS} FROM document_chunks c ORDER BY c.chunk_id"
+        f"SELECT {_CHUNK_FIELDS}, 0 AS fts_rank FROM document_chunks c"
+        " ORDER BY c.chunk_id"
     ).fetchall()
     chunks = [
         row for row in _rows_to_dicts(rows) if visible_to_account(row, account_id)
@@ -67,7 +69,7 @@ def agreement_chunks(conn, account_id):
     the scope constraint alone selects exactly the right document.
     """
     rows = conn.execute(
-        f"SELECT {_CHUNK_FIELDS} FROM document_chunks c"
+        f"SELECT {_CHUNK_FIELDS}, 0 AS fts_rank FROM document_chunks c"
         " WHERE c.scope = ? AND c.authority_rank = 1 ORDER BY c.chunk_id",
         (account_id,),
     ).fetchall()

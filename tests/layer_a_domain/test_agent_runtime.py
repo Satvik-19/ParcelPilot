@@ -17,14 +17,15 @@ import pytest
 
 from backend.agent.config import MAX_TOOL_ITERATIONS
 from backend.agent.context import args_digest
-from backend.agent.executor import derive_answer_state, run_turn
+from backend.agent.executor import derive_answer_state, run_turn, serialize_envelope
 from backend.agent.groq_client import GroqAPIError
 from backend.agent.planner import validate_call
 from backend.agent.tools_schema import (FORBIDDEN_TOOL_NAMES, MODEL_TOOLS,
                                         TOOL_NAMES)
 from backend.db.database import open_database
 from backend.db.seed import seed_database
-from backend.tools._envelope import envelope_error, envelope_ok
+from backend.tools._envelope import envelope_error, envelope_ok, envelope_rejected
+from backend.trust.evidence import EvidenceRecord
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_PACK = PROJECT_ROOT / "assessment_docs"
@@ -248,24 +249,29 @@ class TestLoop:
         assert "Identity parameters" in feedback["result"]["message"]
         assert result.answer_state == "INSUFFICIENT_EVIDENCE"
 
-    def test_repeated_rejections_escalate(self, seeded_db, customer_sessions,
-                                          trace_path):
+    def test_repeated_denials_are_definitive_not_escalation(self, seeded_db,
+                                                            customer_sessions,
+                                                            trace_path):
         conn, _ = seeded_db
-        # ACCT-001 probing ACCT-002's order twice -> two neutral rejections.
+        # ACCT-001 probing ACCT-002's order — a neutral rejection is a
+        # trusted deterministic decision (ISSUE 3). The runtime now
+        # terminates early when every envelope is a rejection (the model
+        # has hit an access wall), so only ONE tool call fires before the
+        # turn ends. The contract: definitive ANSWER, never ESCALATE,
+        # never INSUFFICIENT_EVIDENCE, with a safe user-facing message.
         client = FakeClient([
             call_msg("query_operations",
                      {"entity": "order", "entity_id": "ORD-2001"},
                      call_id="call_1"),
-            call_msg("query_operations",
-                     {"entity": "order", "entity_id": "ORD-2001"},
-                     call_id="call_2"),
             final_msg("I could not find that order."),
         ])
         result = run_turn(conn, customer_sessions["ACCT-001"],
                           "Look up ORD-2001 please.", client,
                           trace_path=trace_path)
-        assert result.answer_state == "ESCALATE"
-        assert "consecutive" in result.state_reason
+        assert result.answer_state == "ANSWER"
+        statuses = [r["status"] for r in result.trace["tools"]]
+        assert statuses == ["rejected"]
+        assert "unable to access" in result.answer.lower()
 
     def test_prepare_action_drafts_and_records_action_id(self, fresh_db,
                                                          customer_sessions,
@@ -369,7 +375,7 @@ class TestTrace:
         assert trace == result.trace
         assert set(trace) == {"request_id", "session_id", "turn_id", "tools",
                               "answer_state", "evidence_ids",
-                              "total_latency_ms"}
+                              "total_latency_ms", "model_calls"}
         assert trace["session_id"] == "sess-acct-001"
         assert trace["turn_id"] == 7
         record = trace["tools"][0]
@@ -387,3 +393,211 @@ class TestTrace:
                      turn_id=turn_id, trace_path=trace_path)
         lines = trace_path.read_text(encoding="utf-8").strip().splitlines()
         assert [json.loads(line)["turn_id"] for line in lines] == [1, 2]
+
+
+# --------------------------------------------------------------------------
+# Compact tool feedback — serialize_envelope strips per-record text
+# --------------------------------------------------------------------------
+
+class TestCompactFeedback:
+    def test_serialize_envelope_strips_text_from_evidence(self):
+        """The full text of evidence records must not leak into the model's
+        tool feedback — it inflates the prompt without adding value since
+        the model already saw the text when search_knowledge returned it."""
+        record = EvidenceRecord(
+            evidence_id="doc#section", source_doc="doc", section="section",
+            status="CURRENT", authority_rank=2, applicable_to="all accounts",
+            text="A very long policy paragraph that should not be in feedback.",
+        )
+        env = envelope_ok({"fee": 0}, evidence=[record])
+        serialized = serialize_envelope(env)
+        assert serialized["status"] == "ok"
+        assert serialized["evidence"], "evidence records must be present"
+        for ev in serialized["evidence"]:
+            assert "text" not in ev, "per-record text must be stripped"
+            assert ev["evidence_id"] == "doc#section"
+
+    def test_serialize_envelope_preserves_text_in_result(self):
+        """The model needs per-record text from tool results (e.g.
+        search_knowledge) to formulate accurate, source-grounded answers.
+        Evidence record text is stripped (duplicate of result text), but
+        the result itself must keep its text fields."""
+        env = envelope_ok({
+            "cancellation": {
+                "cancellable": True,
+                "text": "Full cancellation policy text here...",
+                "evidence": ("doc#sec1", "doc#sec2"),
+            },
+        })
+        serialized = serialize_envelope(env)
+        # Result text is preserved — the model needs it:
+        assert serialized["result"]["cancellation"]["text"] == (
+            "Full cancellation policy text here..."
+        )
+        # Citation tuples survive (the model needs them to cite):
+        assert list(serialized["result"]["cancellation"]["evidence"]) == [
+            "doc#sec1", "doc#sec2"
+        ]
+
+    def test_serialize_envelope_preserves_status_and_structure(self):
+        env = envelope_rejected("ACCESS_DENIED", "Not authorized.")
+        serialized = serialize_envelope(env)
+        assert serialized["status"] == "rejected"
+        assert serialized["result"]["rejection_code"] == "ACCESS_DENIED"
+
+
+# --------------------------------------------------------------------------
+# Early deterministic termination — all-rejection turns skip synthesis
+# --------------------------------------------------------------------------
+
+class TestEarlyTermination:
+    def test_single_rejection_ends_turn_as_answer(self, seeded_db,
+                                                   customer_sessions,
+                                                   trace_path):
+        """A single deterministic rejection terminates the turn as ANSWER
+        without a synthesis model call — the rejection IS the definitive
+        trusted outcome (ISSUE 3)."""
+        conn, _ = seeded_db
+        client = FakeClient([
+            call_msg("query_operations",
+                     {"entity": "order", "entity_id": "ORD-2001"},
+                     call_id="call_1"),
+            final_msg("This should never be reached."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Show me ORD-2001.", client,
+                          trace_path=trace_path)
+        assert result.answer_state == "ANSWER"
+        assert "unable to access" in result.answer.lower()
+        # Only ONE model call happened (no synthesis):
+        assert len(client.received) == 1
+
+    def test_mixed_results_do_not_trigger_early_termination(self, seeded_db,
+                                                            customer_sessions,
+                                                            trace_path):
+        """When at least one envelope is not a rejection (ok or error),
+        early termination does NOT fire — the model must synthesize."""
+        conn, _ = seeded_db
+        client = FakeClient([
+            call_msg("query_operations",
+                     {"entity": "account", "entity_id": "ACCT-001"},
+                     call_id="call_1"),
+            final_msg("Account summary follows."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Show my account.", client,
+                          trace_path=trace_path)
+        # Two model calls: one for the tool call, one for synthesis.
+        assert len(client.received) == 2
+        assert result.answer_state == "ANSWER"
+        assert "account summary" in result.answer.lower()
+
+    def test_model_calls_appear_in_trace(self, seeded_db, customer_sessions,
+                                          trace_path):
+        """Every model call should be recorded in the trace for latency
+        diagnosis — the trace must include model_calls with iteration,
+        latency_ms and tool_calls for each call."""
+        conn, _ = seeded_db
+        client = FakeClient([
+            call_msg("query_operations",
+                     {"entity": "account", "entity_id": "ACCT-001"},
+                     call_id="call_1"),
+            final_msg("Done."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Show my account.", client,
+                          trace_path=trace_path)
+        mc = result.trace["model_calls"]
+        assert len(mc) == 2
+        assert mc[0]["tool_calls"] is True
+        assert mc[1]["tool_calls"] is False
+        assert all("latency_ms" in entry for entry in mc)
+
+
+# --------------------------------------------------------------------------
+# Knowledge-intent routing guard — safety net for prompt non-compliance
+# --------------------------------------------------------------------------
+
+from backend.agent.executor import _is_knowledge_intent, _ROUTING_HINT
+
+
+class TestKnowledgeIntentGuard:
+    def test_guard_fires_when_model_skips_tools_on_knowledge_query(
+            self, seeded_db, customer_sessions, trace_path):
+        """When the model goes directly to a final answer on its first
+        response and the user message looks like a policy/knowledge query,
+        the guard injects a routing hint and gives the model another
+        chance to call search_knowledge."""
+        conn, _ = seeded_db
+        # Script: first call returns no tools (model skipped),
+        # second call (after guard hint) calls search_knowledge,
+        # third call returns final answer.
+        client = FakeClient([
+            final_msg("I don't have that information."),
+            call_msg("search_knowledge",
+                     {"query": "known issue pickup processing"},
+                     call_id="call_1"),
+            final_msg("There is a known issue KI-211 affecting pickup."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Is there a known issue affecting pickup processing?",
+                          client, trace_path=trace_path)
+        # The guard should have fired: 3 model calls total
+        assert len(client.received) == 3
+        # The routing hint should be in the messages of the second call:
+        second_call_messages = client.received[1]
+        contents = [m["content"] for m in second_call_messages
+                    if m["role"] == "system"]
+        assert any(_ROUTING_HINT in c for c in contents)
+        assert result.answer_state == "ANSWER"
+
+    def test_guard_does_not_fire_for_action_requests(self, seeded_db,
+                                                      customer_sessions,
+                                                      trace_path):
+        """Action requests (cancel, refund, etc.) should not trigger the
+        knowledge-intent guard — they need query_operations, not
+        search_knowledge."""
+        conn, _ = seeded_db
+        client = FakeClient([
+            final_msg("Sure, I'll help you cancel."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Please cancel my order.", client,
+                          trace_path=trace_path)
+        # Only one model call — no guard intervention
+        assert len(client.received) == 1
+
+    def test_guard_does_not_fire_when_tools_are_called(self, seeded_db,
+                                                       customer_sessions,
+                                                       trace_path):
+        """When the model calls tools on the first response, the guard
+        must not fire even if the user message is a knowledge query."""
+        conn, _ = seeded_db
+        client = FakeClient([
+            call_msg("search_knowledge",
+                     {"query": "known issue pickup"},
+                     call_id="call_1"),
+            final_msg("There is a known issue."),
+        ])
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Is there a known issue affecting pickup?",
+                          client, trace_path=trace_path)
+        # Two model calls — no guard, just normal tool + synthesis
+        assert len(client.received) == 2
+
+    @pytest.mark.parametrize("message,expected", [
+        ("Is there a known issue affecting pickup?", True),
+        ("What is the cancellation policy?", True),
+        ("What are the SLA targets?", True),
+        ("What plan capabilities do we have?", True),
+        ("Show me my orders", False),
+        ("What is the status of TKT-501?", False),
+        ("Please cancel my order", False),
+        ("Help me with my refund", False),
+        ("Look up ORD-1001", False),
+        ("", False),
+    ])
+    def test_intent_classifier(self, message, expected):
+        """The intent classifier should detect knowledge queries without
+        false-positiving on action requests or entity-specific queries."""
+        assert _is_knowledge_intent(message) == expected

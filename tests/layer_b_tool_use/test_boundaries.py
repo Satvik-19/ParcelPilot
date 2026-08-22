@@ -131,17 +131,24 @@ class TestIdentityBoundary:
     def test_cross_account_lookup_denied_even_when_well_formed(self,
                                                                seeded_conn):
         """A perfectly valid call for another account's entity executes but
-        the authorization layer denies it — scope comes from the session."""
+        the authorization layer denies it — scope comes from the session.
+        The runtime terminates early on deterministic rejection, so only
+        one model call fires — the denial IS the definitive outcome."""
         client = FakeClient([
             call_msg("query_operations",
                      {"entity": "ticket", "entity_id": "TKT-501"}),
             final_msg(),
         ])
         result = _run(client, seeded_conn, SESSION_ACCT_002)
-        feedback = _feedback_blob(client.received[1:])
-        assert "ACCESS_DENIED" in feedback
-        assert TKT_501_SUBJECT not in feedback
-        assert result.answer_state == "INSUFFICIENT_EVIDENCE"
+        # Verify the rejection through the trace (early termination means
+        # no second model call, so there is no feedback blob to inspect):
+        trace_tools = result.trace["tools"]
+        assert len(trace_tools) == 1
+        assert trace_tools[0]["status"] == "rejected"
+        assert TKT_501_SUBJECT not in str(result.evidence)
+        # The denial is a trusted definitive outcome (manual-validation
+        # ISSUE 3) — never INSUFFICIENT_EVIDENCE.
+        assert result.answer_state == "ANSWER"
 
 
 class TestLoopAndProviderGuards:

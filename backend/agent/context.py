@@ -36,6 +36,7 @@ class TurnContext:
         self.provider = None         # groq | openrouter (set by executor)
         self.model_used = None       # actual model that answered
         self.fallback_used = False   # True if fallback provider answered
+        self.model_calls = []        # [{iteration, latency_ms, tool_calls}]
         self._started_at = time.perf_counter()
 
     def record_tool(self, name, args, latency_ms, status):
@@ -74,6 +75,8 @@ class TurnContext:
             trace["model_used"] = self.model_used
         if self.fallback_used:
             trace["fallback_used"] = True
+        if self.model_calls:
+            trace["model_calls"] = self.model_calls
         return trace
 
     def write_trace(self, answer_state):

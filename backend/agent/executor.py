@@ -41,6 +41,11 @@ _CAP_ESCALATE_TEXT = (
     "steps, so it has been escalated for human follow-up. No state-changing "
     "action has been taken."
 )
+_BLANK_ANSWER_ESCALATE_TEXT = (
+    "I was unable to produce a reliable final answer for this request, so "
+    "it has been escalated for human follow-up. No state-changing action "
+    "has been taken."
+)
 _PROVIDER_ESCALATE_TEXT = (
     "The model service is currently unavailable, so I cannot verify any "
     "facts against trusted sources. This request has been escalated for human "
@@ -102,13 +107,80 @@ def execute_tool(name, arguments, conn, session, as_of=None):
 
 
 def serialize_envelope(envelope):
-    """JSON-safe view of a ToolEnvelope for the model's feedback message."""
+    """Compact JSON-safe view of a ToolEnvelope for the model's feedback.
+
+    The model needs the structured result (including per-record ``text``
+    for knowledge queries — it must read policy text to cite facts) plus
+    evidence metadata to cite sources.  Only the evidence *records*
+    (displayed by the UI panel) have their ``text`` stripped: those
+    duplicate the result text and inflating the feedback without adding
+    new information for the model.
+    """
+    compact_evidence = [
+        {k: v for k, v in dataclasses.asdict(record).items() if k != "text"}
+        for record in envelope.evidence
+    ]
     return {
         "status": envelope.status,
         "result": envelope.result,
-        "evidence": [dataclasses.asdict(record) for record in envelope.evidence],
-        "warnings": list(envelope.warnings),
+        "evidence": compact_evidence,
     }
+
+
+# Safe deterministic text for the early-termination path: a single rejection
+# is a trusted definitive outcome (Issue 3), so the turn ends as ANSWER.
+# This text avoids an extra model call just to restate a denial.
+_REJECTION_ANSWER = (
+    "I'm unable to access that data from this session. "
+    "No state-changing action has been taken."
+)
+
+# --- Knowledge-intent routing guard -------------------------------------------
+# If the model skips all tools on its first response and the user message
+# looks like a document/policy/knowledge query, inject one retry hint so the
+# model gets a chance to call search_knowledge before answering.  This is a
+# safety net for prompt non-compliance, not a replacement for good tool-
+# selection guidance.
+#
+# The keyword sets are intentionally generic (no customer names, product
+# names, document IDs, or test-specific wording).
+
+_ENTITY_ID_RE = re.compile(r'\b(ORD-\d+|TKT-\d+|ACCT-\d+)\b')
+
+_KNOWLEDGE_INTENT_KEYWORDS = frozenset({
+    "issue", "known", "policy", "policies", "terms", "agreement",
+    "rule", "rules", "sla", "coverage", "covered", "plan",
+    "capability", "capabilities", "feature", "features",
+    "problem", "bug", "defect",
+})
+
+_ACTION_KEYWORDS = frozenset({
+    "cancel", "refund", "escalate", "update", "create",
+    "prepare", "draft", "execute", "confirm",
+})
+
+
+def _is_knowledge_intent(message):
+    """Heuristic: does the user message look like a document/policy query?
+
+    Returns False when the message contains entity IDs (order/ticket/account
+    references → query_operations) or action verbs (→ prepare_support_action),
+    so the guard only fires on genuinely document-grounded questions.
+    """
+    if _ENTITY_ID_RE.search(str(message)):
+        return False
+    words = set(re.findall(r'\w+', str(message).lower()))
+    if words & _ACTION_KEYWORDS:
+        return False
+    return bool(words & _KNOWLEDGE_INTENT_KEYWORDS)
+
+
+_ROUTING_HINT = (
+    "Before answering, call the appropriate tool to retrieve trusted facts. "
+    "For policy, known-issue, or product-documentation questions, use "
+    "search_knowledge. For account/order/ticket questions, use "
+    "query_operations. Do not answer from memory."
+)
 
 
 # --------------------------------------------------------------------------
@@ -142,9 +214,12 @@ def _has_insufficient_marker(envelopes):
 
 
 def _max_failure_streak(envelopes):
+    """Consecutive structured errors only. Rejections (ACCESS_DENIED,
+    STAFF_ONLY, ...) are deterministic trusted decisions, not failures —
+    they must neither escalate a turn nor masquerade as missing evidence."""
     longest = current = 0
     for env in envelopes:
-        if env.status != "ok":
+        if env.status == "error":
             current += 1
             longest = max(longest, current)
         else:
@@ -160,7 +235,7 @@ def derive_answer_state(envelopes, cap_hit=False):
         return "ESCALATE", "repeated consecutive tool failures"
     if _has_escalation_flag(envelopes):
         return "ESCALATE", "tool result carries an escalation/security flag"
-    if not any(env.status == "ok" for env in envelopes):
+    if not any(env.status in ("ok", "rejected") for env in envelopes):
         return "INSUFFICIENT_EVIDENCE", "no supporting tool result available"
     if _has_insufficient_marker(envelopes):
         return "INSUFFICIENT_EVIDENCE", "tool result reports insufficient evidence"
@@ -223,14 +298,43 @@ def run_turn(conn, session, user_message, client, model=None, history=None,
     envelopes = []
     cap_hit = False
     final_content = None
+    # Early-termination flag: when the model's only tool call produces a
+    # deterministic rejection (ACCESS_DENIED / STAFF_ONLY / ...), the turn
+    # has nothing to synthesize — a rejection IS a definitive trusted
+    # outcome. Skipping the next model call saves one full inference round
+    # on every scope-denial request (the highest-frequency short path).
+    early_rejection = False
+    # Per-model-call latency tracking: each entry is
+    # {"iteration": N, "latency_ms": M, "tool_calls": bool}.
+    model_call_log = []
 
     try:
-        for _ in range(MAX_TOOL_ITERATIONS):
+        for _iter in range(MAX_TOOL_ITERATIONS):
+            model_start = time.perf_counter()
             response = client.complete(messages, tools=MODEL_TOOLS, model=model)
+            model_latency_ms = int((time.perf_counter() - model_start) * 1000)
             message = response["choices"][0]["message"]
             calls = parse_tool_calls(message)
+            ctx.model_calls.append({
+                "iteration": _iter,
+                "latency_ms": model_latency_ms,
+                "tool_calls": bool(calls),
+            })
             if not calls:
                 final_content = strip_internal_reasoning(message.get("content") or "")
+                # Knowledge-intent routing guard: if the model skipped all
+                # tools on its first response and the user message looks like
+                # a document/policy query, give it one more chance with a
+                # routing hint.  This catches prompt non-compliance without
+                # forcing search_knowledge on every query.
+                if (not envelopes
+                        and _is_knowledge_intent(user_message)):
+                    messages.append({
+                        "role": "system",
+                        "content": _ROUTING_HINT,
+                    })
+                    final_content = None
+                    continue
                 break
 
             messages.append(_assistant_message(message))
@@ -259,6 +363,14 @@ def run_turn(conn, session, user_message, client, model=None, history=None,
                     "content": json.dumps(
                         serialize_envelope(envelope), default=str),
                 })
+
+            # Early termination: if every envelope so far is a deterministic
+            # rejection and no ok/error results exist, the model has hit an
+            # access wall — one more call can only restate the denial.
+            if (envelopes
+                    and all(e.status == "rejected" for e in envelopes)):
+                early_rejection = True
+                break
         else:
             cap_hit = True  # model never produced a final answer in budget
     except ProviderError as exc:
@@ -270,6 +382,21 @@ def run_turn(conn, session, user_message, client, model=None, history=None,
 
     answer_state, reason = derive_answer_state(envelopes, cap_hit=cap_hit)
     answer = _CAP_ESCALATE_TEXT if cap_hit else final_content
+
+    # Early-termination: a single rejection is already a definitive
+    # trusted outcome — skip the synthesis model call entirely.
+    if early_rejection and not cap_hit and not final_content:
+        answer_state = "ANSWER"
+        reason = "deterministic rejection — no synthesis required"
+        answer = _REJECTION_ANSWER
+
+    # A blank final message is a generation failure, never an answer: the UI
+    # must not present an empty ANSWER when trusted evidence exists. Escalate
+    # safely instead (the cap-hit text is already non-blank).
+    if not cap_hit and not (answer or "").strip():
+        answer_state = "ESCALATE"
+        reason = "model produced no final answer text"
+        answer = _BLANK_ANSWER_ESCALATE_TEXT
 
     # Provider metadata (ADR-008): record which provider/model answered.
     # FallbackProvider exposes provider_name/model_used; raw clients may not.

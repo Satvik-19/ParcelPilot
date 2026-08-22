@@ -9,6 +9,7 @@ no phrasing can make this tool return another account's chunks.
 from backend.security import authorization
 from backend.trust import evidence
 
+from ._accounts import canonical_account_id
 from ._envelope import envelope_error, envelope_ok, envelope_rejected
 
 
@@ -22,6 +23,10 @@ def search_knowledge(conn, session, query, account_scope=None,
     if not query or not str(query).strip():
         return envelope_error("INVALID_INPUT", "A non-empty query is required.")
 
+    # Canonicalize display-name scopes ("LumenWorks") before the scope check;
+    # authorization still runs on the resolved canonical id.
+    if account_scope:
+        account_scope = canonical_account_id(conn, account_scope) or account_scope
     scope = account_scope or sess.account_id
     if not scope:
         return envelope_error("INVALID_INPUT",

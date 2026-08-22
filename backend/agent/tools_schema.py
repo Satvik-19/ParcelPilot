@@ -51,9 +51,12 @@ MODEL_TOOLS = [
                 "Look up an account, order or ticket. Returns trusted "
                 "computed state: cancellation outcome, service-credit "
                 "outcome, severity, SLA status and known-issue attribution. "
-                "Order results also carry supported_actions — the draftable "
-                "next steps implied by those outcomes. Never recomputes "
-                "anything client-side."
+                "Account results include the account's order_ids and "
+                "ticket_ids — for account-level questions (\"show me my "
+                "orders\") fetch the account first, then the individual "
+                "entities. Order results also carry supported_actions — the "
+                "draftable next steps implied by those outcomes. Never "
+                "recomputes anything client-side."
             ),
             "parameters": {
                 "type": "object",
@@ -64,7 +67,12 @@ MODEL_TOOLS = [
                     },
                     "entity_id": {
                         "type": "string",
-                        "description": "The account_id, order_id or ticket_id.",
+                        "description": (
+                            "The order_id or ticket_id; for accounts the "
+                            "canonical account_id or the account's display "
+                            "name as the user stated it. Requests outside "
+                            "the caller's authorization are rejected."
+                        ),
                     },
                 },
                 "required": ["entity", "entity_id"],

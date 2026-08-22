@@ -201,3 +201,66 @@ def test_invalid_session_shape_rejected(gate_db):
                                      as_of=WITHIN_WINDOW)
     assert outcome["rejection_code"] == "INVALID_SESSION"
     assert _action_row(gate_db, draft["action_id"])["status"] == "pending"
+
+
+# ------------------------------------------------------- all five action types
+# Verify draft-only for prepare and correct execution for confirm across
+# every action type the system supports (03_AGENT_SPEC.md §3).
+
+ESCALATE_PAYLOAD = {"account_id": "ACCT-002", "ticket_id": "TKT-501",
+                    "reason": "SLA breach"}
+UPDATE_PAYLOAD = {"account_id": "ACCT-002", "ticket_id": "TKT-501",
+                  "status": "IN_PROGRESS"}
+FOLLOWUP_PAYLOAD = {"account_id": "ACCT-002", "ticket_id": "TKT-501",
+                    "note": "Follow up on delivery issue"}
+CANCEL_PAYLOAD = {"account_id": "ACCT-002", "order_id": "ORD-2001",
+                  "fee_inr": 250}
+
+
+@pytest.mark.parametrize("action_type,payload,effect_check", [
+    ("escalate_ticket", ESCALATE_PAYLOAD,
+     lambda conn: conn.execute(
+         "SELECT status FROM tickets WHERE ticket_id='TKT-501'").fetchone()["status"]),
+    ("update_ticket", UPDATE_PAYLOAD,
+     lambda conn: conn.execute(
+         "SELECT status FROM tickets WHERE ticket_id='TKT-501'").fetchone()["status"]),
+    ("create_follow_up", FOLLOWUP_PAYLOAD, None),  # no state mutation to verify
+    ("request_cancellation", CANCEL_PAYLOAD,
+     lambda conn: conn.execute(
+         "SELECT status FROM orders WHERE order_id='ORD-2001'").fetchone()["status"]),
+    ("grant_service_credit", CREDIT_PAYLOAD, None),  # tested separately
+])
+def test_prepare_never_mutates_business_state(gate_db, action_type, payload,
+                                               effect_check):
+    """prepare_support_action writes ONLY a pending draft row — the actual
+    business state (tickets, orders, ledger) is untouched until the UI
+    calls confirm_support_action (ADR-004)."""
+    # Snapshot before drafting:
+    before_ticket = gate_db.execute(
+        "SELECT status FROM tickets WHERE ticket_id='TKT-501'").fetchone()
+    before_order = gate_db.execute(
+        "SELECT status FROM orders WHERE order_id='ORD-2001'").fetchone()
+
+    draft = _draft(gate_db, action_type=action_type, payload=payload)
+    assert draft["status"] == "pending"
+
+    # No business state mutated:
+    after_ticket = gate_db.execute(
+        "SELECT status FROM tickets WHERE ticket_id='TKT-501'").fetchone()
+    after_order = gate_db.execute(
+        "SELECT status FROM orders WHERE order_id='ORD-2001'").fetchone()
+    assert before_ticket["status"] == after_ticket["status"]
+    assert before_order["status"] == after_order["status"]
+
+    # Confirm and verify state change:
+    outcome = confirm_support_action(gate_db, CUSTOMER, draft["action_id"],
+                                     draft["token"], as_of=WITHIN_WINDOW)
+    assert outcome["status"] == "executed"
+    if effect_check is not None:
+        state = effect_check(gate_db)
+        if action_type == "escalate_ticket":
+            assert state == "ESCALATED"
+        elif action_type == "update_ticket":
+            assert state == "IN_PROGRESS"
+        elif action_type == "request_cancellation":
+            assert state == "CANCELLED"

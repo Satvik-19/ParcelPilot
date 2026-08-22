@@ -24,6 +24,10 @@ from .conflicts import resolve_conflicts
 
 NON_AUTHORITATIVE_STATUSES = ("DEPRECATED", "HISTORICAL_RESOLUTION")
 _MAX_RESULTS = 8
+# Reserve a minimum number of slots for non-agreement (GENERAL-scoped)
+# evidence so that rank-3 operational/known-issue sources are not crowded
+# out when force-included agreement chunks fill most of the cap.
+_MIN_NON_AGREEMENT_SLOTS = 2
 
 
 @dataclass(frozen=True)
@@ -99,10 +103,43 @@ def gather_evidence(conn, account_id, query=None, include_historical=False,
     for chunk in hits:
         selected.setdefault(chunk["chunk_id"], chunk)
 
-    # Deterministic order: authoritative ranks first, then chunk_id.
-    ordered = sorted(selected.values(), key=lambda c: (c["authority_rank"], c["chunk_id"]))
+    # Deterministic ordering: authoritative chunks by rank then best lexical
+    # match (bm25 fts_rank; force-included chunks carry 0), then chunk_id.
+    sort_key = lambda c: (c["authority_rank"], c.get("fts_rank") or 0,
+                          c["chunk_id"])
+    contextual = [c for c in selected.values()
+                  if c["status"] in NON_AUTHORITATIVE_STATUSES]
     if not include_historical:
-        ordered = [c for c in ordered if c["status"] not in NON_AUTHORITATIVE_STATUSES]
+        ordered = sorted((c for c in selected.values()
+                          if c["status"] not in NON_AUTHORITATIVE_STATUSES),
+                         key=sort_key)
+    else:
+        # An explicit historical request must actually surface the context
+        # that matched: authoritative chunks keep priority, but matching
+        # context-only chunks are guaranteed representation within the cap
+        # (golden cases 10/11, LC-06) instead of being trimmed away by
+        # stronger authoritative matches.
+        authoritative = sorted((c for c in selected.values()
+                                if c["status"] not in NON_AUTHORITATIVE_STATUSES),
+                               key=sort_key)
+        contextual.sort(key=lambda c: (c.get("fts_rank") or 0, c["chunk_id"]))
+        keep = min(len(contextual), _MAX_RESULTS // 4)
+        ordered = authoritative[:_MAX_RESULTS - keep] + contextual[:keep]
+
+    # Source-diversity trimming: when force-included agreement chunks (rank 1)
+    # would fill most of the cap, reserve a minimum number of slots for
+    # non-agreement (GENERAL-scoped) evidence.  This prevents rank-3
+    # operational / known-issue sources from being crowded out entirely
+    # for accounts with active agreements, without increasing the cap.
+    if len(ordered) > _MAX_RESULTS:
+        agreement = [c for c in ordered if c["scope"] != "GENERAL"]
+        other = [c for c in ordered if c["scope"] == "GENERAL"]
+        min_other = min(_MIN_NON_AGREEMENT_SLOTS, len(other))
+        max_agreement = _MAX_RESULTS - min_other
+        if len(agreement) > max_agreement:
+            ordered = agreement[:max_agreement] + other[:min_other]
+            ordered = sorted(ordered, key=sort_key)
+
     ordered = ordered[:_MAX_RESULTS]
 
     records = [evidence_from_chunk(chunk, as_of) for chunk in ordered]

@@ -17,8 +17,11 @@ from ._errors import ProviderError
 _USER_AGENT = "ParcelPilot/1.0 (support-agent runtime)"
 
 _RETRYABLE = (408, 429, 500, 502, 503, 504)
-_MAX_ATTEMPTS = 3
-_BACKOFF_SECONDS = 2.0
+# OpenRouter is the fallback, not a second chance to wait forever. One attempt
+# with a firm timeout: if the free-tier router is cold or slow, the executor
+# escalates rather than blocking the user for minutes.
+_MAX_ATTEMPTS = 1
+_BACKOFF_SECONDS = 1.0
 
 
 class OpenRouterAPIError(ProviderError):
@@ -62,7 +65,7 @@ class OpenRouterClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=120) as response:
+                with urllib.request.urlopen(request, timeout=60) as response:
                     return json.load(response)
             except urllib.error.HTTPError as err:
                 detail = err.read().decode("utf-8", "replace")[:300]

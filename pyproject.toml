@@ -1,0 +1,8 @@
+[project]
+name = "parcelpilot"
+version = "1.0.0"
+description = "ParcelPilot AI support agent for CalQuity assessment"
+requires-python = ">=3.10"
+
+[tool.vercel]
+entrypoint = "api/server.py"

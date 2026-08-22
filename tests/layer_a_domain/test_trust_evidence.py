@@ -86,12 +86,21 @@ def test_evidence_ranks_only_1_to_3_or_none(seeded_db):
 def test_agreement_overrides_sop_with_traceable_marker(seeded_db):
     conn, _ = seeded_db
     records = gather_evidence(conn, "ACCT-001", query="cancellation fee")
-    sop = [r for r in records if r.source_doc.startswith("03_")]
-    agreement = [r for r in records if r.source_doc.startswith("05_")]
+    sop = [r for r in records
+           if r.source_doc.startswith("03_") and r.section != "Header"]
+    agreement = [r for r in records
+                 if r.source_doc.startswith("05_") and r.section != "Header"]
     assert sop and agreement
-    winner = min(agreement, key=lambda r: r.evidence_id)
+    # Each SOP section is overridden by the agreement section that covers
+    # the SAME subtopic — not by the agreement Header (metadata).
     for rec in sop:
-        assert rec.overridden_by == winner.evidence_id  # explicit, traceable
+        assert rec.overridden_by is not None, (
+            f"SOP {rec.section} should be overridden by a matching agreement"
+            " section"
+        )
+        assert "#Header" not in rec.overridden_by, (
+            "agreement Header must never override a substantive SOP section"
+        )
     assert all(rec.overridden_by is None for rec in agreement)
 
 
@@ -121,23 +130,35 @@ def test_historical_sources_never_win_or_lose_conflicts():
 
 
 def test_higher_rank_wins_and_equal_rank_does_not_conflict():
-    sop_a = EvidenceRecord(
-        evidence_id="03_sop#a", source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
-        section="a", status="CURRENT", authority_rank=2, applicable_to="x", text="t",
+    """Subtopic-aware conflicts: same subtopic → higher rank wins;
+    different subtopics → no conflict even at the same rank."""
+    sop_cancel = EvidenceRecord(
+        evidence_id="03_sop#Section 1: Order cancellation",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 1: Order cancellation", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
     )
-    sop_b = EvidenceRecord(
-        evidence_id="03_sop#b", source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
-        section="b", status="CURRENT", authority_rank=2, applicable_to="x", text="t",
+    sop_credits = EvidenceRecord(
+        evidence_id="03_sop#Section 2: Failed-pickup service credits",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 2: Failed-pickup service credits", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
     )
-    agreement = EvidenceRecord(
-        evidence_id="05_agreement#a", source_doc="05_Northstar_Enterprise_Agreement",
-        section="a", status="ACTIVE", authority_rank=1, applicable_to="x", text="t",
+    agreement_cancel = EvidenceRecord(
+        evidence_id="05_agree#Section 2: Shipment cancellation",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Section 2: Shipment cancellation", status="ACTIVE",
+        authority_rank=1, applicable_to="account ACCT-001", text="t",
     )
-    resolved = resolve_conflicts([sop_a, sop_b, agreement])
+    resolved = resolve_conflicts([sop_cancel, sop_credits, agreement_cancel])
     by_id = {r.evidence_id: r for r in resolved}
-    assert by_id["03_sop#a"].overridden_by == "05_agreement#a"
-    assert by_id["03_sop#b"].overridden_by == "05_agreement#a"
-    assert by_id["05_agreement#a"].overridden_by is None  # winner unmarked
+    # SOP cancellation overridden by agreement cancellation (same subtopic):
+    assert by_id["03_sop#Section 1: Order cancellation"].overridden_by == \
+        "05_agree#Section 2: Shipment cancellation"
+    # SOP credits NOT overridden — no matching agreement credit section:
+    assert by_id["03_sop#Section 2: Failed-pickup service credits"].overridden_by is None
+    # Agreement winner stays unmarked:
+    assert by_id["05_agree#Section 2: Shipment cancellation"].overridden_by is None
 
 
 def test_topic_mapping_covers_the_six_documents():
@@ -160,3 +181,131 @@ def test_evidence_from_chunk_promotes_metadata():
     assert rec.authority_rank == 2
     assert rec.excluded_reason is None
     assert "2026-07-01" in rec.applicable_to
+
+
+# --- Subtopic-aware conflict resolution ----------------------------------------
+
+def test_header_never_wins_or_overrides_substantive_section():
+    """Document Headers are metadata — they never participate as winners
+    in conflict resolution and never mark a substantive section as
+    overridden."""
+    header = EvidenceRecord(
+        evidence_id="05_agree#Header",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Header", status="ACTIVE", authority_rank=1,
+        applicable_to="account ACCT-001", text="agreement metadata",
+    )
+    sop_cancel = EvidenceRecord(
+        evidence_id="03_sop#Section 1: Order cancellation",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 1: Order cancellation", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
+    )
+    resolved = resolve_conflicts([header, sop_cancel])
+    by_id = {r.evidence_id: r for r in resolved}
+    # Header stays in the trace but never marks anything as overridden:
+    assert by_id["05_agree#Header"].overridden_by is None
+    # SOP section is NOT overridden because the Header has no subtopic:
+    assert by_id["03_sop#Section 1: Order cancellation"].overridden_by is None
+
+
+def test_unrelated_agreement_section_does_not_override_unrelated_sop():
+    """An agreement's cancellation section must not override the SOP's
+    credit section — they govern different policy subjects."""
+    agree_cancel = EvidenceRecord(
+        evidence_id="05_agree#Section 2: Shipment cancellation",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Section 2: Shipment cancellation", status="ACTIVE",
+        authority_rank=1, applicable_to="account ACCT-001", text="t",
+    )
+    sop_credits = EvidenceRecord(
+        evidence_id="03_sop#Section 2: Failed-pickup service credits",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 2: Failed-pickup service credits", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
+    )
+    resolved = resolve_conflicts([agree_cancel, sop_credits])
+    by_id = {r.evidence_id: r for r in resolved}
+    assert by_id["03_sop#Section 2: Failed-pickup service credits"].overridden_by is None
+    assert by_id["05_agree#Section 2: Shipment cancellation"].overridden_by is None
+
+
+def test_same_subtopic_higher_rank_wins():
+    """When two records share a topic AND subtopic, the higher-rank
+    record wins — the loser's overridden_by points to the winner."""
+    sop_credits = EvidenceRecord(
+        evidence_id="03_sop#Section 2: Failed-pickup service credits",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 2: Failed-pickup service credits", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
+    )
+    agree_credits = EvidenceRecord(
+        evidence_id="05_agree#Section 3: Service credits",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Section 3: Service credits", status="ACTIVE",
+        authority_rank=1, applicable_to="account ACCT-001", text="t",
+    )
+    resolved = resolve_conflicts([sop_credits, agree_credits])
+    by_id = {r.evidence_id: r for r in resolved}
+    assert by_id["03_sop#Section 2: Failed-pickup service credits"].overridden_by == \
+        "05_agree#Section 3: Service credits"
+    assert by_id["05_agree#Section 3: Service credits"].overridden_by is None
+
+
+def test_sop_approval_not_overridden_by_unrelated_agreement_section():
+    """SOP §3 (Approval and uncertainty) has no counterpart in the
+    agreement — it must not be overridden by an unrelated section."""
+    sop_approval = EvidenceRecord(
+        evidence_id="03_sop#Section 3: Approval and uncertainty",
+        source_doc="03_Cancellation_and_Service_Credit_SOP_v4",
+        section="Section 3: Approval and uncertainty", status="CURRENT",
+        authority_rank=2, applicable_to="all accounts", text="t",
+    )
+    agree_cancel = EvidenceRecord(
+        evidence_id="05_agree#Section 2: Shipment cancellation",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Section 2: Shipment cancellation", status="ACTIVE",
+        authority_rank=1, applicable_to="account ACCT-001", text="t",
+    )
+    agree_credits = EvidenceRecord(
+        evidence_id="05_agree#Section 3: Service credits",
+        source_doc="05_Northstar_Logistics_Enterprise_Agreement",
+        section="Section 3: Service credits", status="ACTIVE",
+        authority_rank=1, applicable_to="account ACCT-001", text="t",
+    )
+    resolved = resolve_conflicts([sop_approval, agree_cancel, agree_credits])
+    by_id = {r.evidence_id: r for r in resolved}
+    assert by_id["03_sop#Section 3: Approval and uncertainty"].overridden_by is None
+
+
+# --- Evidence slot source-diversity allocation ---------------------------------
+
+def test_non_agreement_evidence_gets_minimum_representation(seeded_db):
+    """When an agreement's chunks would fill most of the 8-slot cap,
+    the diversity allocator reserves slots for non-agreement (GENERAL-scoped)
+    evidence so rank-3 operational/known-issue sources are not crowded out."""
+    conn, _ = seeded_db
+    # ACCT-001 has a Northstar agreement (rank 1, multiple sections).
+    # A broad query returns many chunks; verify non-agreement evidence
+    # survives the cap.
+    records = gather_evidence(conn, "ACCT-001", query="service credit pickup")
+    non_agreement = [r for r in records if "all accounts" in r.applicable_to]
+    agreement = [r for r in records if "all accounts" not in r.applicable_to]
+    # At least some non-agreement evidence must survive:
+    assert len(non_agreement) >= 1, (
+        f"expected at least 1 non-agreement record, got {len(non_agreement)}")
+    assert len(records) <= 8
+    # Agreement records should still be present:
+    assert len(agreement) >= 1
+
+
+def test_no_diversity_cap_without_agreement(seeded_db):
+    """For accounts without an agreement (ACCT-003), the diversity cap is
+    irrelevant — all chunks are GENERAL-scoped and the standard ranking
+    applies."""
+    conn, _ = seeded_db
+    records = gather_evidence(conn, "ACCT-003", query="known issue")
+    # All records should be GENERAL-scoped:
+    assert all("all accounts" in r.applicable_to for r in records)
+    assert len(records) <= 8
+

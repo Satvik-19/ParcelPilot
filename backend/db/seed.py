@@ -108,6 +108,17 @@ def _seed_documents(conn, data_pack_dir, tickets):
 def seed_database(db_path, data_pack_dir=DEFAULT_DATA_PACK):
     """Create db_path and seed it from the assessment data pack. Returns counts."""
     db_path = Path(db_path)
+    data_pack_dir = Path(data_pack_dir)
+    if not (data_pack_dir / "ParcelPilot_Assessment_Data.xlsx").is_file():
+        # The pack is distributed separately (see README) — fail with an
+        # actionable message instead of a bare loader traceback.
+        raise FileNotFoundError(
+            f"Assessment data pack not found at '{data_pack_dir}'. Seeding "
+            "requires the assessment_docs/ pack (workbook "
+            "'ParcelPilot_Assessment_Data.xlsx' + the six policy PDFs); "
+            "place it at the repository root or pass its path explicitly: "
+            "python -m backend.db.seed <db_path> <data_pack_dir>"
+        )
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()  # seeding is always from scratch — no stale state
