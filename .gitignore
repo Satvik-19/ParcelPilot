@@ -32,7 +32,7 @@ ENV/
 !.env.example
 
 # Candidate data pack (must be supplied separately — see README)
-assessment_docs/
+# assessment_docs/  # deployed with the app for Vercel serverless seeding
 
 # Generated databases, traces, and recordings
 data/

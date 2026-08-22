@@ -22,6 +22,7 @@ import io
 import json
 import mimetypes
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -61,25 +62,37 @@ class ParcelPilotApp:
 
     @staticmethod
     def _open_or_seed(db_path=None):
-        """Open an existing DB file or create an in-memory seeded copy."""
+        """Open an existing DB file or create a seeded copy."""
+        import shutil, sqlite3
+
         if db_path:
             return open_database(db_path, check_same_thread=False)
-        # Try the production path first (warm invocation may have it).
+
+        # Warm invocation: the production DB file persists on Vercel.
         if _DEFAULT_DB_PATH.is_file():
             return open_database(_DEFAULT_DB_PATH, check_same_thread=False)
-        # Cold start: seed into memory.
-        import tempfile, sqlite3
-        tmp = Path(tempfile.mktemp(suffix=".db"))
+
+        # Cold start: seed from the assessment data pack into a
+        # persistent file so warm invocations skip re-seeding.
+        _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _DATA_PACK.is_file():
+            seed_database(_DEFAULT_DB_PATH, _DATA_PACK)
+            return open_database(_DEFAULT_DB_PATH, check_same_thread=False)
+
+        # Data pack not found — fall back to in-memory read-only DB.
+        # Use sqlite3.backup() for a reliable binary copy (executescript
+        # cannot handle raw SQLite bytes).
+        tmp_src = Path(tempfile.mktemp(suffix=".db"))
         try:
-            seed_database(tmp, _DATA_PACK)
-            on_disk = tmp.read_bytes()
+            seed_database(tmp_src, _DATA_PACK)
+            src = sqlite3.connect(str(tmp_src))
+            mem = sqlite3.connect(":memory:", check_same_thread=False)
+            src.backup(mem)
+            src.close()
+            mem.row_factory = sqlite3.Row
+            return mem
         finally:
-            tmp.unlink(missing_ok=True)
-        mem = sqlite3.connect(":memory:", check_same_thread=False)
-        mem.row_factory = sqlite3.Row
-        mem.executescript(on_disk.decode("utf-8") if isinstance(on_disk, bytes)
-                          else on_disk)
-        return mem
+            tmp_src.unlink(missing_ok=True)
 
     # ---- internal helpers ------------------------------------------------
 
