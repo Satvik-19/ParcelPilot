@@ -3,6 +3,10 @@ name = "parcelpilot"
 version = "1.0.0"
 description = "ParcelPilot AI support agent for CalQuity assessment"
 requires-python = ">=3.10"
+dependencies = [
+  "openpyxl>=3.1",
+  "pypdf>=4.0",
+]
 
 [tool.vercel]
 entrypoint = "api/server.py"
