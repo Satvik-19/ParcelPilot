@@ -56,8 +56,17 @@ function currentSession() {
 /* ---------------------------------------------------------------- sessions */
 
 async function loadSessions() {
-  const { payload } = await api("/api/sessions");
-  state.sessions = payload.sessions || [];
+  const { ok, status, payload } = await api("/api/sessions").catch(() => ({
+    ok: false, status: 0, payload: { error: "Network error." },
+  }));
+  if (!ok || !payload.sessions) {
+    const msg = payload.error || payload.message || `HTTP ${status}`;
+    el.sessionSelect.innerHTML =
+      `<option disabled selected>Failed to load sessions: ${esc(msg)}</option>`;
+    state.sessions = [];
+    return;
+  }
+  state.sessions = payload.sessions;
   el.sessionSelect.innerHTML = state.sessions
     .map((s) => `<option value="${esc(s.key)}">${esc(s.label)}</option>`)
     .join("");
