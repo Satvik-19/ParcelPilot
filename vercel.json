@@ -9,14 +9,6 @@
     {
       "src": "/api/(.*)",
       "dest": "api/server.py"
-    },
-    {
-      "src": "/assets/(.*)",
-      "dest": "/frontend/assets/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "api/server.py"
     }
   ]
 }
