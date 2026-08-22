@@ -124,6 +124,7 @@ def serialize_envelope(envelope):
         "status": envelope.status,
         "result": envelope.result,
         "evidence": compact_evidence,
+        "warnings": list(envelope.warnings),
     }
 
 
@@ -304,6 +305,9 @@ def run_turn(conn, session, user_message, client, model=None, history=None,
     # outcome. Skipping the next model call saves one full inference round
     # on every scope-denial request (the highest-frequency short path).
     early_rejection = False
+    # Routing guard fires at most once per turn — prevents repeated hint
+    # injection when the model keeps skipping tools.
+    guard_fired = False
     # Per-model-call latency tracking: each entry is
     # {"iteration": N, "latency_ms": M, "tool_calls": bool}.
     model_call_log = []
@@ -328,7 +332,9 @@ def run_turn(conn, session, user_message, client, model=None, history=None,
                 # routing hint.  This catches prompt non-compliance without
                 # forcing search_knowledge on every query.
                 if (not envelopes
+                        and not guard_fired
                         and _is_knowledge_intent(user_message)):
+                    guard_fired = True
                     messages.append({
                         "role": "system",
                         "content": _ROUTING_HINT,

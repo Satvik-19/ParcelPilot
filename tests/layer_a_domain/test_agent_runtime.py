@@ -601,3 +601,54 @@ class TestKnowledgeIntentGuard:
         """The intent classifier should detect knowledge queries without
         false-positiving on action requests or entity-specific queries."""
         assert _is_knowledge_intent(message) == expected
+
+    def test_guard_fires_at_most_once(self, seeded_db, customer_sessions,
+                                      trace_path):
+        """When the model keeps skipping tools on a knowledge query,
+        the routing hint must be injected at most once, not repeated
+        on every iteration."""
+        conn, _ = seeded_db
+        # Script: model never calls tools, always returns final messages.
+        # Without the guard_fired flag, the hint would inject 7 times
+        # (MAX_TOOL_ITERATIONS - 1). With the flag, exactly once.
+        never_tool_script = [
+            final_msg("I cannot help.")
+            for _ in range(8)  # MAX_TOOL_ITERATIONS
+        ]
+        client = FakeClient(never_tool_script)
+        result = run_turn(conn, customer_sessions["ACCT-001"],
+                          "Is there a known issue affecting pickup?",
+                          client, trace_path=trace_path)
+        # Count how many system messages with the routing hint were added
+        hint_count = 0
+        for messages in client.received:
+            for m in messages:
+                if m.get("role") == "system" and _ROUTING_HINT in m.get("content", ""):
+                    hint_count += 1
+        assert hint_count == 1, (
+            f"Routing hint injected {hint_count} times; expected at most 1")
+        # The turn should still terminate (cap hit or escalation)
+        assert result.answer_state in ("ESCALATE", "INSUFFICIENT_EVIDENCE")
+
+
+class TestWarningsSerialization:
+    def test_envelope_warnings_survive_serialization(self):
+        """The serialize_envelope function must include envelope.warnings
+        in the output so the model can see warning metadata."""
+        env = envelope_ok(
+            {"result": "ok"},
+            evidence=[],
+            warnings=["Monthly aggregate credits are capped at INR 5,000"],
+        )
+        serialized = serialize_envelope(env)
+        assert "warnings" in serialized
+        assert serialized["warnings"] == [
+            "Monthly aggregate credits are capped at INR 5,000"
+        ]
+
+    def test_envelope_warnings_empty_by_default(self):
+        """When no warnings are set, the serialized output has an empty
+        list — not a missing key."""
+        env = envelope_ok({"result": "ok"})
+        serialized = serialize_envelope(env)
+        assert serialized["warnings"] == []

@@ -88,11 +88,15 @@ def agreement_for(account_id):
 
 
 def _to_fts_query(query):
-    """Quote every word token so arbitrary user text is safe FTS5 syntax."""
+    """Quote every word token so arbitrary user text is safe FTS5 syntax.
+
+    Tokens are OR-joined to match production behaviour (recall > precision;
+    bm25 rank + authority filters keep precision).
+    """
     tokens = re.findall(r"\w+", query)
     if not tokens:
         raise ValueError(f"empty FTS query: {query!r}")
-    return " ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def fts_search(conn, query, account_id=None, authoritative_only=False):

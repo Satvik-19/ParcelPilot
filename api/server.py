@@ -83,6 +83,8 @@ def application(environ, start_response):
     if path.startswith("/api/"):
         if _boot_error:
             status, payload = 500, {"error": f"App failed to start: {_boot_error}"}
+        elif _app is None:
+            status, payload = 500, {"error": "App failed to initialise (unknown error)."}
         else:
             status, payload = _route(method, path, body, session_key)
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
