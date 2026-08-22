@@ -1,0 +1,5 @@
+# Phase 1–2 dependencies only. New dependencies require justification in the
+# session handoff (05_CODING_AGENT_RULES.md §8).
+openpyxl>=3.1      # xlsx -> SQLite seeding (assessment workbook)
+pypdf>=4.0         # deterministic PDF text extraction (real text layer, no OCR)
+pytest>=7.4        # Layer A test suite

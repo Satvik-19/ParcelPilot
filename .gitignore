@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+ENV/
+
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+
+# Candidate data pack (must be supplied separately — see README)
+assessment_docs/
+
+# Generated databases, traces, and recordings
+data/
+recordings/
+
+# AI coding-agent metadata
+.qoder/
+.freebuff/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated logs and caches
+.pytest_cache/
+*.log
+*_output.txt
+pytest_out.txt
+
+# Scratch / debug scripts at root level only (not backend/_*.py modules)
+/_*.py
+
+# Stray files
+--help

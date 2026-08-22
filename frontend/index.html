@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ParcelPilot — AI Support Agent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">PP</span>
+      <div class="brand-text">
+        <h1>ParcelPilot</h1>
+        <p>AI support agent &middot; trusted answers with provenance</p>
+      </div>
+    </div>
+    <div class="session-control">
+      <label for="session-select">Session context</label>
+      <select id="session-select" aria-label="Session context"></select>
+      <span id="session-badge" class="badge badge-role"></span>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-view="chat" id="tab-chat">Chat</button>
+    <button class="tab hidden" data-view="insights" id="tab-insights">Proactive insights</button>
+  </nav>
+
+  <main>
+    <!-- ============================== CHAT ============================== -->
+    <section id="view-chat" class="view">
+      <div id="messages" class="messages" aria-live="polite">
+        <div class="empty-state" id="empty-state">
+          <h2>Ask about your orders, tickets, cancellations or service credits.</h2>
+          <p>Every answer shows its answer state, the tools used and the exact
+             policy evidence behind it. State-changing actions are drafted first
+             and only happen after your explicit confirmation.</p>
+        </div>
+      </div>
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="composer-input" rows="2" maxlength="4000"
+                  placeholder="Type your request…" required></textarea>
+        <button type="submit" id="composer-send">Send</button>
+      </form>
+    </section>
+
+    <!-- ============================ INSIGHTS ============================ -->
+    <section id="view-insights" class="view hidden">
+      <div class="insights-head">
+        <h2>Proactive issue detection</h2>
+        <p>Deterministic analytics over live ticket data — SLA risk, known-issue
+           matches and cross-account patterns. Internal staff only.</p>
+        <button id="insights-refresh" class="secondary">Refresh</button>
+      </div>
+      <div id="insights-content" class="insights-content">
+        <p class="muted">Loading insights…</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Mocked session &mdash; no real authentication.</span>
+    <span>Actions are drafted, then confirmed by you, then executed by the backend.</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
