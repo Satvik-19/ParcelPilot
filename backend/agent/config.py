@@ -9,6 +9,15 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Writable runtime directory for serverless / ephemeral state.
+# On Vercel the deployment filesystem (/var/task) is read-only, so DB and
+# trace files must go to /tmp which is the platform-supported writable temp.
+# Locally this resolves to PROJECT_ROOT (unchanged behaviour).
+if os.environ.get("VERCEL") or str(PROJECT_ROOT).startswith("/var/task"):
+    RUNTIME_DIR = Path("/tmp") / "parcelpilot"
+else:
+    RUNTIME_DIR = PROJECT_ROOT
+
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 

@@ -12,9 +12,9 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import PROJECT_ROOT
+from .config import PROJECT_ROOT, RUNTIME_DIR
 
-DEFAULT_TRACE_PATH = PROJECT_ROOT / "data" / "traces.jsonl"
+DEFAULT_TRACE_PATH = RUNTIME_DIR / "data" / "traces.jsonl"
 
 
 def args_digest(args):

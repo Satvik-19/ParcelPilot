@@ -36,10 +36,11 @@ def _boot():
 
 def _lazy_import_and_seed():
     global _app
+    from backend.agent.config import RUNTIME_DIR
     from backend.db.database import open_database
     from backend.db.seed import seed_database
 
-    db_path = PROJECT_ROOT / "data" / "parcel_pilot.db"
+    db_path = RUNTIME_DIR / "data" / "parcel_pilot.db"
     data_pack = PROJECT_ROOT / "assessment_docs"
 
     if db_path.is_file():

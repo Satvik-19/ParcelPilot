@@ -19,15 +19,15 @@ from datetime import datetime
 from pathlib import Path
 
 from backend.actions.confirm import confirm_support_action
-from backend.agent.config import PROJECT_ROOT
+from backend.agent.config import PROJECT_ROOT, RUNTIME_DIR
 from backend.agent.executor import run_turn
 from backend.db.database import open_database
 from backend.tools.analyze_support_activity import analyze_support_activity
 
 from . import sessions as session_registry
 
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "parcel_pilot.db"
-DEFAULT_TRACE_PATH = PROJECT_ROOT / "data" / "traces.jsonl"
+DEFAULT_DB_PATH = RUNTIME_DIR / "data" / "parcel_pilot.db"
+DEFAULT_TRACE_PATH = RUNTIME_DIR / "data" / "traces.jsonl"
 
 
 class ParcelPilotApp:
